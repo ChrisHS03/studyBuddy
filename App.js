@@ -75,6 +75,7 @@ export default function App() {
   const [linkTitle, setLinkTitle] = useState('');
   const [linkUrl, setLinkUrl] = useState('');
   const [messageBody, setMessageBody] = useState('');
+  const [inviteEmail, setInviteEmail] = useState('');
 
   // === Derived state ===
   const selectedGroup = groups.find((group) => group.id === selectedGroupId) ?? null;
@@ -111,6 +112,7 @@ export default function App() {
     setLinkTitle('');
     setLinkUrl('');
     setMessageBody('');
+    setInviteEmail('');
   };
 
   // === Data loaders: hent tasks/notes/links/messages for gruppe ===
@@ -123,23 +125,31 @@ export default function App() {
       return { error: null };
     }
 
-    const [tasksResult, notesResult, linksResult, messagesResult] = await Promise.all([
+    const [tasksResult, notesResult, linksResult, messagesResult, profilesResult] = await Promise.all([
       supabase.from('tasks').select('*').eq('group_id', groupId).order('created_at', { ascending: false }),
       supabase.from('notes').select('*').eq('group_id', groupId).order('updated_at', { ascending: false }),
       supabase.from('links').select('*').eq('group_id', groupId).order('created_at', { ascending: false }),
       supabase.from('messages').select('*').eq('group_id', groupId).order('created_at', { ascending: true }),
+      supabase.from('profiles').select('id, email'),
     ]);
 
-    const firstError = tasksResult.error ?? notesResult.error ?? linksResult.error ?? messagesResult.error;
+    const firstError = tasksResult.error ?? notesResult.error ?? linksResult.error ?? messagesResult.error ?? profilesResult.error;
 
     if (firstError) {
       return { error: firstError.message };
     }
 
+    const profileMap = new Map((profilesResult.data ?? []).map((p) => [p.id, p]));
+
+    const messagesWithSender = (messagesResult.data ?? []).map((msg) => ({
+      ...msg,
+      sender: profileMap.get(msg.sender_id),
+    }));
+
     setTasks(tasksResult.data ?? []);
     setNotes(notesResult.data ?? []);
     setLinks(linksResult.data ?? []);
-    setMessages(messagesResult.data ?? []);
+    setMessages(messagesWithSender);
 
     return { error: null };
   };
@@ -617,6 +627,64 @@ export default function App() {
     setSaving(false);
   };
 
+  const handleAddUserToGroup = async () => {
+    if (!supabase || !selectedGroupId) {
+      return;
+    }
+
+    if (!inviteEmail.trim()) {
+      Alert.alert('Missing email', 'Enter an email address to add a user.');
+      return;
+    }
+
+    setSaving(true);
+    setErrorMessage('');
+
+    try {
+      const email = inviteEmail.trim().toLowerCase();
+
+      const { data: users, error: lookupError } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('email', email);
+
+      if (lookupError) {
+        setErrorMessage('Error looking up user: ' + lookupError.message);
+        setSaving(false);
+        return;
+      }
+
+      if (!users || users.length === 0) {
+        setErrorMessage('No user found with that email address.');
+        setSaving(false);
+        return;
+      }
+
+      const { error: addError } = await supabase.from('group_members').insert({
+        group_id: selectedGroupId,
+        user_id: users[0].id,
+        role: 'member',
+      });
+
+      if (addError) {
+        if (addError.message.includes('duplicate')) {
+          setErrorMessage('This user is already a member of the group.');
+        } else {
+          setErrorMessage(addError.message);
+        }
+        setSaving(false);
+        return;
+      }
+
+      setInviteEmail('');
+      Alert.alert('Success', `${email} has been added to the group.`);
+    } catch (err) {
+      setErrorMessage('An error occurred: ' + (err?.message || 'Unknown error'));
+    }
+
+    setSaving(false);
+  };
+
   // === Render: Auth screen (login/signup) ===
   const renderAuthScreen = () => (
     <SafeAreaProvider>
@@ -708,6 +776,26 @@ export default function App() {
         })}
       </ScrollView>
 
+      {selectedGroup && (
+        <>
+          <Text style={styles.formTitle}>Add member to group</Text>
+          <TextInput
+            value={inviteEmail}
+            onChangeText={setInviteEmail}
+            placeholder='Email address of user to add'
+            autoCapitalize='none'
+            keyboardType='email-address'
+            textContentType='emailAddress'
+            style={styles.input}
+          />
+
+          <Pressable style={[styles.buttonBase, styles.secondaryButton, styles.fullWidthButton]} onPress={handleAddUserToGroup} disabled={saving}>
+            <Text style={styles.secondaryButtonText}>{saving ? 'Adding...' : 'Add to group'}</Text>
+          </Pressable>
+        </>
+      )}
+
+      <Text style={styles.formTitle}>Create new group</Text>
       <TextInput
         value={groupName}
         onChangeText={setGroupName}
@@ -868,34 +956,45 @@ export default function App() {
   );
 
   // === Render: Chat UI ===
-  const renderChat = () => (
-    <View>
-      <Text style={styles.sectionLabel}>Chat</Text>
+  const renderChat = () => {
+    const getSenderName = (message) => {
+      if (message.sender?.email) {
+        return message.sender.email.split('@')[0];
+      }
+      return 'Unknown';
+    };
 
-      <View style={styles.messageList}>
-            {messages.length ? (
-          messages.map((message) => {
-            const isMine = message.sender_id === session?.user?.id;
+    return (
+      <View>
+        <Text style={styles.sectionLabel}>Chat</Text>
 
-            return (
-              <View key={message.id} style={[styles.messageBubble, isMine ? styles.messageBubbleMine : styles.messageBubbleOther]}>
-                <Text style={[styles.messageText, isMine && styles.messageTextMine]}>{message.body}</Text>
-                <Text style={[styles.messageTime, isMine && styles.messageTimeMine]}>{formatDateTime(message.created_at)}</Text>
-              </View>
-            );
-          })
-        ) : (
-          <Text style={styles.emptyText}>No messages yet.</Text>
-        )}
+        <View style={styles.messageList}>
+              {messages.length ? (
+            messages.map((message) => {
+              const isMine = message.sender_id === session?.user?.id;
+              const senderName = getSenderName(message);
+
+              return (
+                <View key={message.id} style={[styles.messageBubble, isMine ? styles.messageBubbleMine : styles.messageBubbleOther]}>
+                  <Text style={[styles.messageSender, isMine && styles.messageSenderMine]}>{senderName}</Text>
+                  <Text style={[styles.messageText, isMine && styles.messageTextMine]}>{message.body}</Text>
+                  <Text style={[styles.messageTime, isMine && styles.messageTimeMine]}>{formatDateTime(message.created_at)}</Text>
+                </View>
+              );
+            })
+          ) : (
+            <Text style={styles.emptyText}>No messages yet.</Text>
+          )}
+        </View>
+
+        <TextInput value={messageBody} onChangeText={setMessageBody} placeholder='Write a message...' style={[styles.input, styles.largeInput]} multiline />
+
+        <Pressable style={[styles.buttonBase, styles.primaryButton, styles.fullWidthButton]} onPress={handleSendMessage} disabled={saving}>
+          <Text style={styles.primaryButtonText}>{saving ? 'Sending...' : 'Send message'}</Text>
+        </Pressable>
       </View>
-
-      <TextInput value={messageBody} onChangeText={setMessageBody} placeholder='Write a message...' style={[styles.input, styles.largeInput]} multiline />
-
-      <Pressable style={[styles.buttonBase, styles.primaryButton, styles.fullWidthButton]} onPress={handleSendMessage} disabled={saving}>
-        <Text style={styles.primaryButtonText}>{saving ? 'Sending...' : 'Send message'}</Text>
-      </Pressable>
-    </View>
-  );
+    );
+  };
 
   // === Render: vælg aktiv sektion ===
   const renderActiveSection = () => {

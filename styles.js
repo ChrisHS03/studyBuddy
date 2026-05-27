@@ -332,6 +332,15 @@ export default StyleSheet.create({
   messageTextMine: {
     color: '#ffffff',
   },
+  messageSender: {
+    color: '#64748b',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  messageSenderMine: {
+    color: '#cbd5e1',
+  },
   messageTime: {
     color: '#64748b',
     fontSize: 11,
